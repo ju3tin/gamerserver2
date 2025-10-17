@@ -37,7 +37,7 @@
 
     document.getElementById('connect').onclick = () => {
       if (ws) { append('Already connected'); return; }
-      ws = new WebSocket(`ws://${location.hostname}:${location.port || 8080}`);
+      ws = new WebSocket(`wss://${location.hostname}:${location.port || 8080}`);
       ws.onopen = () => append('WS connected');
       ws.onmessage = (m) => {
         const msg = JSON.parse(m.data);
