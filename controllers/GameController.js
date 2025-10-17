@@ -7,33 +7,35 @@ const User = require("../models/User");
 const ProvablyFairSeed = require("../models/ProvablyFairSeed");
 
 // ----------------- Game State -----------------
-let currentMultiplier = 1.0;    // Live multiplier
+let currentMultiplier = 1.0;    // Live multiplier (full precision)
 let gameState = "waiting";      // "waiting" | "running" | "ended"
-let isRunning = false;          // Prevents multiple intervals
-let timeElapsed = 0;            // Tracks elapsed time for exponential curve
+let isRunning = false;          // Prevent multiple intervals
+let timeElapsed = 0;            // Timer for exponential growth
 
-// ----------------- Utility: Hash helpers -----------------
+// ----------------- Utility Functions -----------------
 function sha256(input) {
   return crypto.createHash("sha256").update(input).digest("hex");
 }
 
-// Bustabit-like deterministic multiplier algorithm
+// Generate a 32-byte random server seed
+function generateServerSeed() {
+  return crypto.randomBytes(32).toString("hex");
+}
+
+// Provably fair multiplier calculation
 function getBustMultiplier(hash) {
   const h = parseInt(hash.slice(0, 13), 16);
   const e = 2 ** 52;
-  if (h % 33 === 0) return 1.0; // 1/33 chance of instant crash
+
+  if (h % 33 === 0) return 1.01; // instant crash chance, minimum 1.01
   const result = (100 * (e - h)) / (e - 1);
-  return Math.floor(result) / 100;
+
+  return Math.max(Math.floor(result) / 100, 1.01); // minimum 1.01
 }
 
-// Combine serverSeed, clientSeed, and round index (nonce)
+// Combine serverSeed, clientSeed, and nonce for deterministic hash
 function getRoundHash(serverSeed, clientSeed, nonce) {
   return sha256(`${serverSeed}:${clientSeed}:${nonce}`);
-}
-
-// Generate random 32-byte server seed
-function generateServerSeed() {
-  return crypto.randomBytes(32).toString("hex");
 }
 
 // ----------------- Broadcast Helper -----------------
@@ -55,19 +57,19 @@ async function ensureSeed() {
   return seedDoc;
 }
 
-// ----------------- Game Core -----------------
+// ----------------- Start Game -----------------
 async function startGame(wss) {
   try {
-    // Set initial state for new round
+    // Reset game state
     gameState = "waiting";
     isRunning = false;
     currentMultiplier = 1.0;
     timeElapsed = 0;
 
-    // Ensure we have a current active seed
+    // Ensure server seed exists
     const seedDoc = await ensureSeed();
 
-    // Create a new round in DB
+    // Create new round in DB
     const round = new GameRound({
       startTime: new Date(),
       crashMultiplier: 0,
@@ -75,8 +77,6 @@ async function startGame(wss) {
       seedHash: seedDoc.serverSeedHash,
     });
     await round.save();
-
-    console.log(`🎮 New round created. Seed hash: ${seedDoc.serverSeedHash}`);
 
     broadcast(wss, { action: "GAME_WAITING", message: "Place your bets!" });
 
@@ -88,14 +88,14 @@ async function startGame(wss) {
       if (countdown < 0) clearInterval(countdownInterval);
     }, 1000);
 
-    // After countdown, start the live round
+    // ----------------- Start Round -----------------
     setTimeout(async () => {
       gameState = "running";
       isRunning = true;
 
-      // Calculate provably fair crash point
+      // Generate deterministic crash point
       const nonce = await GameRound.countDocuments();
-      const clientSeed = "global_client_seed";
+      const clientSeed = "global_client_seed"; // replace with per-user seeds if desired
       const roundHash = getRoundHash(seedDoc.serverSeed, clientSeed, nonce);
       const crashPoint = getBustMultiplier(roundHash);
 
@@ -109,14 +109,17 @@ async function startGame(wss) {
         seedHash: seedDoc.serverSeedHash,
       });
 
-      console.log(`🚀 Round started, will crash at ${crashPoint}x`);
+      console.log(`🚀 Round started. Crash at ${crashPoint}x`);
 
-      // ----------------- Multiplier Simulation -----------------
+      // ----------------- Multiplier Loop -----------------
       timeElapsed = 0;
       const interval = setInterval(async () => {
-        timeElapsed += 0.05; // Every 50ms
-        currentMultiplier = parseFloat(Math.pow(2, timeElapsed / 10).toFixed(2));
+        timeElapsed += 0.05; // 50ms per tick
 
+        // Exponential growth
+        currentMultiplier = Math.pow(2, timeElapsed / 10);
+
+        // Broadcast multiplier to clients (2 decimal precision)
         broadcast(wss, {
           action: "CNT_MULTIPLY",
           multiplier: currentMultiplier.toFixed(2),
@@ -130,10 +133,9 @@ async function startGame(wss) {
           await endGame(wss, round._id);
         }
       }, 50);
-    }, 11000); // Wait 11 seconds for countdown
-
+    }, 11000); // Wait for countdown
   } catch (err) {
-    console.error("❌ Error starting game:", err);
+    console.error("❌ Error in startGame:", err);
   }
 }
 
@@ -167,7 +169,7 @@ async function endGame(wss, roundId) {
     }
   }
 
-  // Start next round after 5 seconds
+  // Start next round after 5s
   setTimeout(() => startGame(wss), 5000);
 }
 
@@ -187,7 +189,6 @@ async function handleBet(ws, data, wss) {
     let round = await GameRound.findOne().sort({ startTime: -1 });
     if (!round) return ws.send(JSON.stringify({ action: "ERROR", message: "No active round." }));
 
-    // Deduct bet from user balance
     user.balances[currency] -= amount;
     await user.save();
 
