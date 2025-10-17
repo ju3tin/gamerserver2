@@ -1,60 +1,52 @@
 // controllers/GameController.js
 
-// ----------------- Imports -----------------
 const crypto = require("crypto");
 const GameRound = require("../models/GameRound");
 const User = require("../models/User");
 const ProvablyFairSeed = require("../models/ProvablyFairSeed");
 
 // ----------------- Game State -----------------
-let currentMultiplier = 1.0;    // Live multiplier (full precision)
+let currentMultiplier = 1.0;    // Full precision
 let gameState = "waiting";      // "waiting" | "running" | "ended"
-let isRunning = false;          // Prevent multiple intervals
-let timeElapsed = 0;            // Timer for exponential growth
+let isRunning = false;
+let timeElapsed = 0;
 
-// ----------------- Utility Functions -----------------
+// ----------------- Helper Functions -----------------
 function sha256(input) {
   return crypto.createHash("sha256").update(input).digest("hex");
 }
 
-// Generate a 32-byte random server seed
-function generateServerSeed() {
-  return crypto.randomBytes(32).toString("hex");
-}
-
-// Provably fair multiplier calculation
-function getBustMultiplier(hash) {
-  const h = parseInt(hash.slice(0, 13), 16);
-  const e = 2 ** 52;
-
-  if (h % 33 === 0) return 1.01; // instant crash chance, minimum 1.01
-  const result = (100 * (e - h)) / (e - 1);
-
-  return Math.max(Math.floor(result) / 100, 1.01); // minimum 1.01
-}
-
-// Combine serverSeed, clientSeed, and nonce for deterministic hash
-function getRoundHash(serverSeed, clientSeed, nonce) {
-  return sha256(`${serverSeed}:${clientSeed}:${nonce}`);
-}
-
-// ----------------- Broadcast Helper -----------------
-function broadcast(wss, msg) {
-  wss.clients.forEach(client => {
-    if (client.readyState === 1) client.send(JSON.stringify(msg));
-  });
-}
-
-// ----------------- Provably Fair Seed System -----------------
+// Ensure there is an unrevealed server seed
 async function ensureSeed() {
   let seedDoc = await ProvablyFairSeed.findOne({ revealed: false });
   if (!seedDoc) {
-    const serverSeed = generateServerSeed();
+    const serverSeed = crypto.randomBytes(32).toString("hex");
     const serverSeedHash = sha256(serverSeed);
     seedDoc = new ProvablyFairSeed({ serverSeed, serverSeedHash, revealed: false });
     await seedDoc.save();
   }
   return seedDoc;
+}
+
+// Combine server seed, client seed, and nonce for deterministic round hash
+function getRoundHash(serverSeed, clientSeed, nonce) {
+  return sha256(`${serverSeed}:${clientSeed}:${nonce}`);
+}
+
+// Convert hash to a smooth multiplier between 1.5x and 10x
+function getBustMultiplier(hash) {
+  const h = parseInt(hash.slice(0, 13), 16);
+  const e = 2 ** 52;
+  const r = h / e;
+  const multiplier = 1.5 + r * 8.5; // scale to 1.5x → 10x
+  return parseFloat(multiplier.toFixed(2));
+}
+
+// Broadcast helper
+function broadcast(wss, msg) {
+  wss.clients.forEach(client => {
+    if (client.readyState === 1) client.send(JSON.stringify(msg));
+  });
 }
 
 // ----------------- Start Game -----------------
@@ -66,10 +58,10 @@ async function startGame(wss) {
     currentMultiplier = 1.0;
     timeElapsed = 0;
 
-    // Ensure server seed exists
+    // Get server seed
     const seedDoc = await ensureSeed();
 
-    // Create new round in DB
+    // Create a new round
     const round = new GameRound({
       startTime: new Date(),
       crashMultiplier: 0,
@@ -80,7 +72,7 @@ async function startGame(wss) {
 
     broadcast(wss, { action: "GAME_WAITING", message: "Place your bets!" });
 
-    // ----------------- Countdown Phase -----------------
+    // ----------------- Countdown -----------------
     let countdown = 10;
     const countdownInterval = setInterval(() => {
       broadcast(wss, { action: "COUNTDOWN", time: countdown });
@@ -88,14 +80,14 @@ async function startGame(wss) {
       if (countdown < 0) clearInterval(countdownInterval);
     }, 1000);
 
-    // ----------------- Start Round -----------------
+    // ----------------- Round Start -----------------
     setTimeout(async () => {
       gameState = "running";
       isRunning = true;
 
-      // Generate deterministic crash point
-      const nonce = await GameRound.countDocuments();
-      const clientSeed = "global_client_seed"; // replace with per-user seeds if desired
+      // Provably fair multiplier
+      const nonce = await GameRound.countDocuments(); // current round index
+      const clientSeed = "global_client_seed";        // replace with per-user if desired
       const roundHash = getRoundHash(seedDoc.serverSeed, clientSeed, nonce);
       const crashPoint = getBustMultiplier(roundHash);
 
@@ -109,17 +101,17 @@ async function startGame(wss) {
         seedHash: seedDoc.serverSeedHash,
       });
 
-      console.log(`🚀 Round started. Crash at ${crashPoint}x`);
+      console.log(`🚀 Round started! Crash at ${crashPoint}x`);
 
       // ----------------- Multiplier Loop -----------------
       timeElapsed = 0;
       const interval = setInterval(async () => {
-        timeElapsed += 0.05; // 50ms per tick
+        timeElapsed += 0.05; // 50ms
 
-        // Exponential growth
+        // Exponential growth (smooth)
         currentMultiplier = Math.pow(2, timeElapsed / 10);
 
-        // Broadcast multiplier to clients (2 decimal precision)
+        // Broadcast multiplier
         broadcast(wss, {
           action: "CNT_MULTIPLY",
           multiplier: currentMultiplier.toFixed(2),
@@ -133,7 +125,8 @@ async function startGame(wss) {
           await endGame(wss, round._id);
         }
       }, 50);
-    }, 11000); // Wait for countdown
+
+    }, 11000); // 11s countdown
   } catch (err) {
     console.error("❌ Error in startGame:", err);
   }
@@ -150,30 +143,30 @@ async function endGame(wss, roundId) {
   broadcast(wss, { action: "ROUND_CRASHED", multiplier: currentMultiplier.toFixed(2) });
   console.log(`💥 Round crashed at ${currentMultiplier.toFixed(2)}x`);
 
-  // Reveal seed every 100 rounds for verification
+  // Reveal server seed every 100 rounds
   const totalRounds = await GameRound.countDocuments();
   if (totalRounds % 100 === 0) {
-    const currentSeed = await ProvablyFairSeed.findOne({ revealed: false });
-    if (currentSeed) {
-      currentSeed.revealed = true;
-      currentSeed.revealedAt = new Date();
-      await currentSeed.save();
+    const seed = await ProvablyFairSeed.findOne({ revealed: false });
+    if (seed) {
+      seed.revealed = true;
+      seed.revealedAt = new Date();
+      await seed.save();
 
       broadcast(wss, {
         action: "SEED_REVEALED",
-        serverSeed: currentSeed.serverSeed,
-        serverSeedHash: currentSeed.serverSeedHash,
+        serverSeed: seed.serverSeed,
+        serverSeedHash: seed.serverSeedHash,
       });
 
-      console.log(`🔓 Revealed seed: ${currentSeed.serverSeed}`);
+      console.log(`🔓 Revealed server seed: ${seed.serverSeed}`);
     }
   }
 
-  // Start next round after 5s
+  // Next round after 5s
   setTimeout(() => startGame(wss), 5000);
 }
 
-// ----------------- Handle Bets -----------------
+// ----------------- Handle Bet -----------------
 async function handleBet(ws, data, wss) {
   try {
     const { walletAddress, amount, currency } = data;
