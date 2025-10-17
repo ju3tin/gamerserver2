@@ -1,0 +1,72 @@
+<!-- public/index.html -->
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Crash Test Client</title>
+  <style>
+    body{font-family:Arial;margin:20px;}
+    #log{white-space:pre-wrap;background:#f2f2f2;padding:10px;height:300px;overflow:auto;}
+    button{margin:5px;}
+  </style>
+</head>
+<body>
+  <h2>Provably-Fair Crash Test Client</h2>
+
+  <div>
+    <label>Wallet Address: <input id="wallet" value="player1" /></label>
+    <label>Currency: <input id="currency" value="USD" /></label>
+    <label>Bet amount: <input id="amount" value="10" /></label>
+    <label>Cashout target: <input id="cashout" value="2.5" /></label>
+  </div>
+
+  <div style="margin-top:10px">
+    <button id="connect">Connect</button>
+    <button id="bet">Place Bet</button>
+    <button id="cashoutBtn">Cashout</button>
+    <button id="status">Get Status</button>
+  </div>
+
+  <h3>Events</h3>
+  <div id="log"></div>
+
+  <script>
+    let ws;
+    const logEl = document.getElementById('log');
+    const append = (t) => { logEl.textContent += t + '\n'; logEl.scrollTop = logEl.scrollHeight; };
+
+    document.getElementById('connect').onclick = () => {
+      if (ws) { append('Already connected'); return; }
+      ws = new WebSocket(`ws://${location.hostname}:${location.port || 8080}`);
+      ws.onopen = () => append('WS connected');
+      ws.onmessage = (m) => {
+        const msg = JSON.parse(m.data);
+        append(JSON.stringify(msg));
+      };
+      ws.onclose = () => append('WS closed');
+      ws.onerror = (e) => append('WS error ' + e.message);
+    };
+
+    document.getElementById('bet').onclick = () => {
+      const wallet = document.getElementById('wallet').value;
+      const currency = document.getElementById('currency').value;
+      const amount = parseFloat(document.getElementById('amount').value);
+      if (!ws || ws.readyState !== 1) { append('Not connected'); return; }
+      ws.send(JSON.stringify({ action: 'PLACE_BET', walletAddress: wallet, amount, currency }));
+      append('Sent PLACE_BET');
+    };
+
+    document.getElementById('cashoutBtn').onclick = () => {
+      const wallet = document.getElementById('wallet').value;
+      if (!ws || ws.readyState !== 1) { append('Not connected'); return; }
+      ws.send(JSON.stringify({ action: 'CASHOUT', walletAddress: wallet }));
+      append('Sent CASHOUT');
+    };
+
+    document.getElementById('status').onclick = () => {
+      if (!ws || ws.readyState !== 1) { append('Not connected'); return; }
+      ws.send(JSON.stringify({ action: 'GET_STATUS' }));
+    };
+  </script>
+</body>
+</html>

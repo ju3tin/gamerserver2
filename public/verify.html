@@ -1,0 +1,48 @@
+<!-- public/verify.html -->
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Verify Round</title></head>
+<body>
+  <h2>Verify Round (Client-side)</h2>
+  <div>
+    <label>Server Seed (revealed): <input id="serverSeed" style="width:600px" /></label><br/>
+    <label>Client Seed: <input id="clientSeed" value="global_client_seed" /></label><br/>
+    <label>Nonce (round index): <input id="nonce" value="0" /></label><br/>
+    <label>Expected Bust: <input id="expected" /></label><br/>
+    <button id="run">Verify</button>
+  </div>
+  <pre id="out"></pre>
+
+  <script>
+    // simple SHA256 in browser using SubtleCrypto
+    async function sha256Hex(str) {
+      const enc = new TextEncoder();
+      const data = enc.encode(str);
+      const hash = await crypto.subtle.digest('SHA-256', data);
+      const hex = Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2,'0')).join('');
+      return hex;
+    }
+
+    function getBustMultiplierFromHash(hash) {
+      // take first 13 hex chars -> 52 bits
+      const h = parseInt(hash.slice(0,13), 16);
+      const e = Math.pow(2,52);
+      if (h % 33 === 0) return 1.0;
+      const result = (100 * (e - h)) / (e - 1);
+      return Math.floor(result) / 100;
+    }
+
+    document.getElementById('run').onclick = async () => {
+      const serverSeed = document.getElementById('serverSeed').value.trim();
+      const clientSeed = document.getElementById('clientSeed').value.trim();
+      const nonce = document.getElementById('nonce').value.trim();
+      const expected = document.getElementById('expected').value.trim();
+
+      const roundInput = `${serverSeed}:${clientSeed}:${nonce}`;
+      const roundHash = await sha256Hex(roundInput);
+      const bust = getBustMultiplierFromHash(roundHash);
+      document.getElementById('out').textContent = `roundHash: ${roundHash}\ncomputed bust: ${bust}x\nexpected: ${expected}x\nmatch: ${String(bust) === String(expected)}`;
+    };
+  </script>
+</body>
+</html>
